@@ -28,6 +28,7 @@ import qualified BlueRipple.Model.Demographic.TableProducts as DTP
 import qualified BlueRipple.Model.Demographic.TPModel3 as DTM3
 import qualified BlueRipple.Data.Small.Loaders as BRL
 import qualified BlueRipple.Data.Small.DataFrames as BR
+import qualified BlueRipple.Utilities.KnitUtils as BRK
 
 import qualified BlueRipple.Configuration as BR
 import qualified BlueRipple.Data.CachingCore as BRCC
@@ -72,6 +73,16 @@ import qualified Data.Vinyl.Functor as V
 import qualified Text.Printf as PF
 import qualified System.Environment as Env
 
+import qualified Text.Printf as PF
+import qualified Graphics.Vega.VegaLite as GV
+import qualified Graphics.Vega.VegaLite.Compat as FV
+import qualified Graphics.Vega.VegaLite.Configuration as FV
+import qualified Graphics.Vega.VegaLite.JSON as VJ
+
+
+import Path (Dir, Rel)
+import qualified Path
+
 templateVars ∷ Map String String
 templateVars =
   M.fromList
@@ -110,7 +121,7 @@ main = do
   cacheDir <- toText . fromMaybe ".kh-cache" <$> Env.lookupEnv("BR_CACHE_DIR")
   let knitConfig ∷ K.KnitConfig BRCC.SerializerC BRCC.CacheData Text =
         (K.defaultKnitConfig $ Just cacheDir)
-          { K.outerLogPrefix = Just "2023-TSP"
+          { K.outerLogPrefix = Just "Tract-VoterFile"
           , K.logIf = BR.knitLogSeverity $ BR.logLevel cmdLine -- K.logDiagnostic
           , K.pandocWriterConfig = pandocWriterConfig
           , K.serializeDict = BRCC.flatSerializeDict
@@ -119,18 +130,59 @@ main = do
   resE ← K.knitHtmls knitConfig $ do
     K.logLE K.Info $ "Command Line: " <> show cmdLine
     let postInfo = BR.PostInfo (BR.postStage cmdLine) (BR.PubTimes BR.Unpublished Nothing)
-    exploreTractVoterfile cmdLine
+    exploreTractVoterfile cmdLine postInfo
   case resE of
     Right namedDocs →
       K.writeAllPandocResultsWithInfoAsHtml "" namedDocs
     Left err → putTextLn $ "Pandoc Error: " <> Pandoc.renderError err
 
 
-exploreTractVoterfile :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> K.Sem r ()
-exploreTractVoterfile cmdLine = do
-  vfByTract_C <- VF.voterfileByTracts Nothing
-  (F.takeRows 100 <$> K.ignoreCacheTime vfByTract_C) >>= BRLC.logFrame
+exploreTractVoterfile :: (K.KnitMany r, K.KnitEffects r, BRCC.CacheEffects r)
+                      => BR.CommandLine
+                      -> BR.PostInfo
+                      -> K.Sem r ()
+exploreTractVoterfile cmdLine pi = do
+  postPaths <- postPaths "TractTest" cmdLine
+  BRK.brNewPost postPaths pi "TractTest" $ do
+    vfByTract_C <- VF.voterfileByTracts Nothing
+    vfByTract <- K.ignoreCacheTime vfByTract_C
+--    (F.takeRows 100 <$> K.ignoreCacheTime vfByTract_C) >>= BRLC.logFrame
+    geoExample postPaths pi "geoExample" "Test" (FV.fixedSizeVC 500 500 10)
+      ("/Users/adam/BlueRipple/bigData/GeoJSON/USA_Tracts_2022.geojson","GEOID")
+      (show . view GT.tractGeoId)
+      (\r -> let ds = realToFrac (r ^. VF.vFPartyDem); rs = realToFrac (r ^. VF.vFPartyRep) in if ds + rs > 0 then ds - rs / (ds + rs) else 0, "RegRatio")
+      vfByTract
+      >>= K.addHvega Nothing Nothing
+    pure ()
 
+geoExample :: (K.KnitEffects r, Foldable f)
+           => BR.PostPaths Path.Abs
+           -> BR.PostInfo
+           -> Text
+           -> Text
+           -> FV.ViewConfig
+           -> (Text, Text)
+           -> (row -> Text)
+           -> (row -> Double, Text)
+           -> f row
+           -> K.Sem r GV.VegaLite
+geoExample pp pi chartID title vc (geoJsonPath, geoidKey) geoid (val, valName) rows = do
+  let colData r = [ ("GeoId", GV.Str $ geoid r)
+                  , (valName, GV.Number $ val r)
+                  ]
+      jsonRows = FL.fold (VJ.rowsToJSON colData [] Nothing) rows
+  jsonFilePrefix <- K.getNextUnusedId $ ("2023-StateLeg_" <> chartID)
+  jsonDataUrl <-  BRK.brAddJSON pp pi jsonFilePrefix jsonRows
+  geoJsonSrc <- K.liftKnit @IO $ Path.parseAbsFile $ toString geoJsonPath
+  jsonGeoUrl <- BRK.brCopyDataForPost pp pi BRK.LeaveExisting geoJsonSrc Nothing
+  let rowData = GV.dataFromUrl jsonDataUrl [GV.JSON "values"]
+      geoData = GV.dataFromUrl jsonGeoUrl [GV.JSON "features"]
+      encVal = GV.color [GV.MName valName, GV.MmType GV.Quantitative]
+      encoding = (GV.encoding . encVal) []
+      tLookup = (GV.transform . GV.lookup "properties.GEOID" rowData "GeoId" (GV.LuFields ["GeoId",valName])) []
+      mark = GV.mark GV.Geoshape []
+      projection = GV.projection [GV.PrType GV.Identity, GV.PrReflectY True]
+  pure $ BR.brConfiguredVegaLite vc [FV.title title, geoData, tLookup, projection, encoding, mark]
 
 {-
 modelWhiteEvangelicals :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> K.Sem r ()
@@ -188,7 +240,9 @@ modelWhiteEvangelicals cmdLine = do
 --    writeModeled "modeledEvangelical_StA_GivenWWH" $ fmap F.rcast modeledEvangelicalFrame
 --    K.logLE K.Info $ show $ MC.unPSMap $ fst $ modeledEvangelical
 
+-}
 
+{-
 modeledACSBySLD :: forall r . (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> BRC.TableYear -> K.Sem r (K.ActionWithCacheTime r (DP.PSData SLDKeyR))
 modeledACSBySLD cmdLine ty = do
   let (srcWindow, cachedSrc) = ACS.acs1Yr2012_22 @r
@@ -212,11 +266,48 @@ modeledACSBySLD cmdLine ty = do
     $ \x -> DP.PSData . fmap F.rcast <$> (BRL.addStateAbbrUsingFIPS $ F.filterFrame ((== DT.Citizen) . view DT.citizenC) x)
 
 
-type ASRR = '[BR.Year, GT.StateAbbreviation] V.++ BRC.LDLocationR V.++ [DT.Age6C, DT.SexC, BRC.RaceEthnicityC, DT.PopCount]
-
+type ASRR = '[BR.Year, GT.StateAbbreviation] V.++ BRC.TractLocationR V.++ [DT.Age6C, DT.SexC, BRC.RaceEthnicityC, DT.PopCount]
+-}
+{-
 givenASRBySLD :: (K.KnitEffects r, BRCC.CacheEffects r) => BRC.TableYear -> K.Sem r (F.FrameRec ASRR)
 givenASRBySLD ty = do
   asr <- BRC.ageSexRace <$> (K.ignoreCacheTimeM $ BRC.censusTablesForSLDs 2024 ty)
   asr' <- BRL.addStateAbbrUsingFIPS asr
   pure $ fmap F.rcast asr'
 -}
+postDir ∷ Path.Path Rel Dir
+postDir = [Path.reldir|tract-voterfile/posts|]
+
+postLocalDraft
+  ∷ Path.Path Rel Dir
+  → Maybe (Path.Path Rel Dir)
+  → Path.Path Rel Dir
+postLocalDraft p mRSD = case mRSD of
+  Nothing → postDir BR.</> p BR.</> [Path.reldir|draft|]
+  Just rsd → postDir BR.</> p BR.</> rsd
+
+postInputs ∷ Path.Path Rel Dir → Path.Path Rel Dir
+postInputs p = postDir BR.</> p BR.</> [Path.reldir|inputs|]
+
+sharedInputs ∷ Path.Path Rel Dir
+sharedInputs = postDir BR.</> [Path.reldir|Shared|] BR.</> [Path.reldir|inputs|]
+
+postOnline ∷ Path.Path Rel t → Path.Path Rel t
+postOnline p = [Path.reldir|research/TractVoterFile|] BR.</> p
+
+postPaths
+  ∷ (K.KnitEffects r)
+  ⇒ Text
+  → BR.CommandLine
+  → K.Sem r (BR.PostPaths BR.Abs)
+postPaths t cmdLine = do
+  let mRelSubDir = case cmdLine of
+        BR.CLLocalDraft _ _ mS _ → maybe Nothing BR.parseRelDir $ fmap toString mS
+        _ → Nothing
+  postSpecificP ← K.knitEither $ first show $ Path.parseRelDir $ toString t
+  BR.postPaths
+    BR.defaultLocalRoot
+    sharedInputs
+    (postInputs postSpecificP)
+    (postLocalDraft postSpecificP mRelSubDir)
+    (postOnline postSpecificP)
