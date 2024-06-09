@@ -146,11 +146,13 @@ exploreTractVoterfile cmdLine pi = do
   BRK.brNewPost postPaths pi "TractTest" $ do
     vfByTract_C <- VF.voterfileByTracts Nothing
     vfByTract <- K.ignoreCacheTime vfByTract_C
+    K.logLE K.Info $ "Voter Files By Tract has " <> show (length vfByTract) <> " rows."
 --    (F.takeRows 100 <$> K.ignoreCacheTime vfByTract_C) >>= BRLC.logFrame
-    geoExample postPaths pi "geoExample" "Test" (FV.fixedSizeVC 500 500 10)
-      ("/Users/adam/BlueRipple/bigData/GeoJSON/USA_Tracts_2022.geojson","GEOID")
-      (show . view GT.tractGeoId)
-      (\r -> let ds = realToFrac (r ^. VF.vFPartyDem); rs = realToFrac (r ^. VF.vFPartyRep) in if ds + rs > 0 then ds - rs / (ds + rs) else 0, "RegRatio")
+    let geoid r = let x = r ^. GT.tractGeoId in if x < 10000000000 then "0" <> show x else show x
+    geoExample postPaths pi "geoExample" "Test" (FV.fixedSizeVC 1000 1000 10)
+      ("/Users/adam/BlueRipple/bigData/GeoJSON/US_tracts_2022_topo.json","tracts")
+      geoid
+      (\r -> let ds = realToFrac (r ^. VF.vFPartyDem); rs = realToFrac (r ^. VF.vFPartyRep) in if ds + rs > 0 then (ds - rs) / (ds + rs) else 0, "RegRatio")
       vfByTract
       >>= K.addHvega Nothing Nothing
     pure ()
@@ -166,7 +168,7 @@ geoExample :: (K.KnitEffects r, Foldable f)
            -> (row -> Double, Text)
            -> f row
            -> K.Sem r GV.VegaLite
-geoExample pp pi chartID title vc (geoJsonPath, geoidKey) geoid (val, valName) rows = do
+geoExample pp pi chartID title vc (geoJsonPath, topoJsonFeatureKey) geoid (val, valName) rows = do
   let colData r = [ ("GeoId", GV.Str $ geoid r)
                   , (valName, GV.Number $ val r)
                   ]
@@ -176,10 +178,10 @@ geoExample pp pi chartID title vc (geoJsonPath, geoidKey) geoid (val, valName) r
   geoJsonSrc <- K.liftKnit @IO $ Path.parseAbsFile $ toString geoJsonPath
   jsonGeoUrl <- BRK.brCopyDataForPost pp pi BRK.LeaveExisting geoJsonSrc Nothing
   let rowData = GV.dataFromUrl jsonDataUrl [GV.JSON "values"]
-      geoData = GV.dataFromUrl jsonGeoUrl [GV.JSON "features"]
+      geoData = GV.dataFromUrl jsonGeoUrl [GV.TopojsonFeature topoJsonFeatureKey]
       encVal = GV.color [GV.MName valName, GV.MmType GV.Quantitative]
       encoding = (GV.encoding . encVal) []
-      tLookup = (GV.transform . GV.lookup "properties.GEOID" rowData "GeoId" (GV.LuFields ["GeoId",valName])) []
+      tLookup = (GV.transform . GV.lookup "properties.geoid" rowData "GeoId" (GV.LuFields ["GeoId",valName])) []
       mark = GV.mark GV.Geoshape []
       projection = GV.projection [GV.PrType GV.Identity, GV.PrReflectY True]
   pure $ BR.brConfiguredVegaLite vc [FV.title title, geoData, tLookup, projection, encoding, mark]
