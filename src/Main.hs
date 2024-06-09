@@ -130,7 +130,7 @@ main = do
   resE ← K.knitHtmls knitConfig $ do
     K.logLE K.Info $ "Command Line: " <> show cmdLine
     let postInfo = BR.PostInfo (BR.postStage cmdLine) (BR.PubTimes BR.Unpublished Nothing)
-    exploreTractVoterfile cmdLine postInfo
+    exploreTractVoterfile cmdLine postInfo "PA"
   case resE of
     Right namedDocs →
       K.writeAllPandocResultsWithInfoAsHtml "" namedDocs
@@ -140,20 +140,32 @@ main = do
 exploreTractVoterfile :: (K.KnitMany r, K.KnitEffects r, BRCC.CacheEffects r)
                       => BR.CommandLine
                       -> BR.PostInfo
+                      -> Text
                       -> K.Sem r ()
-exploreTractVoterfile cmdLine pi = do
+exploreTractVoterfile cmdLine pi sa = do
   postPaths <- postPaths "TractTest" cmdLine
   BRK.brNewPost postPaths pi "TractTest" $ do
     vfByTract_C <- VF.voterfileByTracts Nothing
+    states <- K.ignoreCacheTimeM BRL.stateAbbrCrosswalkLoader
+    let fipsByState = FL.fold (FL.premap (\r -> (r ^. GT.stateAbbreviation, r ^. GT.stateFIPS)) FL.map) states
+    stateFIPS <- K.knitMaybe ("FIPS lookup failed for " <> sa) $ M.lookup sa fipsByState
     vfByTract <- K.ignoreCacheTime vfByTract_C
+
     K.logLE K.Info $ "Voter Files By Tract has " <> show (length vfByTract) <> " rows."
+    let vfByTractForState = F.filterFrame ((== stateFIPS) . view GT.stateFIPS) vfByTract
+    K.logLE K.Info $ sa <> " voter Files By Tract has " <> show (length vfByTractForState) <> " rows."
+
 --    (F.takeRows 100 <$> K.ignoreCacheTime vfByTract_C) >>= BRLC.logFrame
     let geoid r = let x = r ^. GT.tractGeoId in if x < 10000000000 then "0" <> show x else show x
+        regDiff r =
+          let ds = realToFrac (r ^. VF.vFPartyDem)
+              rs = realToFrac (r ^. VF.vFPartyRep)
+          in ds - rs --if ds + rs > 0 then (ds - rs) / (ds + rs) else 0
     geoExample postPaths pi "geoExample" "Test" (FV.fixedSizeVC 1000 1000 10)
-      ("/Users/adam/BlueRipple/bigData/GeoJSON/US_tracts_2022_topo.json","tracts")
+      ("/Users/adam/BlueRipple/bigData/GeoJSON/states/" <> sa <> "_2022_tracts_topo.json","tracts")
       geoid
-      (\r -> let ds = realToFrac (r ^. VF.vFPartyDem); rs = realToFrac (r ^. VF.vFPartyRep) in if ds + rs > 0 then (ds - rs) / (ds + rs) else 0, "RegRatio")
-      vfByTract
+      (regDiff, "RegDiff")
+      vfByTractForState
       >>= K.addHvega Nothing Nothing
     pure ()
 
@@ -179,12 +191,15 @@ geoExample pp pi chartID title vc (geoJsonPath, topoJsonFeatureKey) geoid (val, 
   jsonGeoUrl <- BRK.brCopyDataForPost pp pi BRK.LeaveExisting geoJsonSrc Nothing
   let rowData = GV.dataFromUrl jsonDataUrl [GV.JSON "values"]
       geoData = GV.dataFromUrl jsonGeoUrl [GV.TopojsonFeature topoJsonFeatureKey]
-      encVal = GV.color [GV.MName valName, GV.MmType GV.Quantitative]
-      encoding = (GV.encoding . encVal) []
-      tLookup = (GV.transform . GV.lookup "properties.geoid" rowData "GeoId" (GV.LuFields ["GeoId",valName])) []
+      tLookup = GV.lookup "properties.geoid" rowData "GeoId" (GV.LuFields ["GeoId",valName])
+      perValName = valName <> "perSqm"
+      tComputePer = GV.calculateAs ("datum." <> valName <> "/ log(datum.properties.aland)") perValName
+      transform = (GV.transform . tLookup . tComputePer) []
+      encValPer = GV.color [GV.MName perValName, GV.MmType GV.Quantitative]
+      encoding = (GV.encoding . encValPer) []
       mark = GV.mark GV.Geoshape []
       projection = GV.projection [GV.PrType GV.Identity, GV.PrReflectY True]
-  pure $ BR.brConfiguredVegaLite vc [FV.title title, geoData, tLookup, projection, encoding, mark]
+  pure $ BR.brConfiguredVegaLite vc [FV.title title, geoData, transform, projection, encoding, mark]
 
 {-
 modelWhiteEvangelicals :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> K.Sem r ()
