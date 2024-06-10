@@ -1,4 +1,4 @@
-packages: ./ ../../libs/model-demographic ../../libs/data-RDH-voterfiles
+packages: ./ ../../libs/model-demographic ../../libs/data-RDH-voterfiles ../../libs/small-data-sets
 jobs: 4
 with-compiler: ghc
 profiling: False
@@ -16,7 +16,7 @@ allow-newer: polysemy-zoo:ghc-prim, streamly-core
 flags: +streamly9
 
 import: ../../libs/cabal_repo_imports/post-tools.project
-import: ../../libs/cabal_repo_imports/small-data-sets.project
+--import: ../../libs/cabal_repo_imports/small-data-sets.project
 import: ../../libs/cabal_repo_imports/data-types.project
 import: ../../libs/cabal_repo_imports/data-tools.project
 import: ../../libs/cabal_repo_imports/data-loading.project

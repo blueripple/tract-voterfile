@@ -65,6 +65,7 @@ import qualified Control.Foldl as FL
 import Control.Lens (view, (^.))
 
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Vinyl as V
 import qualified Data.Vinyl.TypeLevel as V
@@ -143,31 +144,41 @@ exploreTractVoterfile :: (K.KnitMany r, K.KnitEffects r, BRCC.CacheEffects r)
                       -> Text
                       -> K.Sem r ()
 exploreTractVoterfile cmdLine pi sa = do
+  let geoid r = let x = r ^. GT.tractGeoId in if x < 10000000000 then "0" <> show x else show x
+
   postPaths <- postPaths "TractTest" cmdLine
   BRK.brNewPost postPaths pi "TractTest" $ do
     vfByTract_C <- VF.voterfileByTracts Nothing
     states <- K.ignoreCacheTimeM BRL.stateAbbrCrosswalkLoader
+    tractsByDistrict <- K.ignoreCacheTimeM BRL.tractsByDistrictLoader
+
     let fipsByState = FL.fold (FL.premap (\r -> (r ^. GT.stateAbbreviation, r ^. GT.stateFIPS)) FL.map) states
     stateFIPS <- K.knitMaybe ("FIPS lookup failed for " <> sa) $ M.lookup sa fipsByState
     vfByTract <- K.ignoreCacheTime vfByTract_C
 
     K.logLE K.Info $ "Voter Files By Tract has " <> show (length vfByTract) <> " rows."
     let vfByTractForState = F.filterFrame ((== stateFIPS) . view GT.stateFIPS) vfByTract
+        (regDem, regRep) = FL.fold ((,) <$> FL.premap (view VF.vFPartyDem) FL.sum <*> FL.premap (view VF.vFPartyRep) FL.sum) vfByTractForState
     K.logLE K.Info $ sa <> " voter Files By Tract has " <> show (length vfByTractForState) <> " rows."
+    K.logLE K.Info $ sa <> " has " <> show regDem <> " registered Dems and " <> show regRep <> " registered Republicans."
 
---    (F.takeRows 100 <$> K.ignoreCacheTime vfByTract_C) >>= BRLC.logFrame
-    let geoid r = let x = r ^. GT.tractGeoId in if x < 10000000000 then "0" <> show x else show x
-        regDiff r =
+    let regDiff r =
           let ds = realToFrac (r ^. VF.vFPartyDem)
               rs = realToFrac (r ^. VF.vFPartyRep)
           in ds - rs --if ds + rs > 0 then (ds - rs) / (ds + rs) else 0
-    geoExample postPaths pi "geoExample" "Test" (FV.fixedSizeVC 1000 1000 10)
-      ("/Users/adam/BlueRipple/bigData/GeoJSON/states/" <> sa <> "_2022_tracts_topo.json","tracts")
-      geoid
-      (regDiff, "RegDiff")
-      vfByTractForState
-      >>= K.addHvega Nothing Nothing
-    pure ()
+    for_ [1, 7, 8, 10, 12, 17] $ \cd -> do
+      let cdT = show cd
+          dCriteria r = r ^. GT.districtTypeC == GT.Congressional && r ^. GT.districtName == cdT
+          incTracts = FL.fold (FL.premap geoid FL.set) $ F.filterFrame dCriteria tractsByDistrict
+      geoExample postPaths pi ("RegDiff_PA_" <> cdT)
+        ("PA " <> cdT <> ": (Reg D - Reg R)/area") (FV.fixedSizeVC 1000 1000 10)
+        ("/Users/adam/BlueRipple/bigData/GeoJSON/states/" <> sa <> "_2022_tracts_topo.json","tracts")
+        geoid
+        (Just incTracts)
+        (regDiff, "RegDiff")
+        vfByTractForState
+        >>= K.addHvega Nothing Nothing
+      pure ()
 
 geoExample :: (K.KnitEffects r, Foldable f)
            => BR.PostPaths Path.Abs
@@ -177,10 +188,11 @@ geoExample :: (K.KnitEffects r, Foldable f)
            -> FV.ViewConfig
            -> (Text, Text)
            -> (row -> Text)
+           -> Maybe (Set Text)
            -> (row -> Double, Text)
            -> f row
            -> K.Sem r GV.VegaLite
-geoExample pp pi chartID title vc (geoJsonPath, topoJsonFeatureKey) geoid (val, valName) rows = do
+geoExample pp pi chartID title vc (geoJsonPath, topoJsonFeatureKey) geoid incTractsM (val, valName) rows = do
   let colData r = [ ("GeoId", GV.Str $ geoid r)
                   , (valName, GV.Number $ val r)
                   ]
@@ -192,10 +204,14 @@ geoExample pp pi chartID title vc (geoJsonPath, topoJsonFeatureKey) geoid (val, 
   let rowData = GV.dataFromUrl jsonDataUrl [GV.JSON "values"]
       geoData = GV.dataFromUrl jsonGeoUrl [GV.TopojsonFeature topoJsonFeatureKey]
       tLookup = GV.lookup "properties.geoid" rowData "GeoId" (GV.LuFields ["GeoId",valName])
-      perValName = valName <> "perSqm"
+      perValName = valName <> "perSqMi"
+--      tComputePer = GV.calculateAs ("2589975 * datum." <> valName <> "/ datum.properties.aland") perValName
       tComputePer = GV.calculateAs ("datum." <> valName <> "/ log(datum.properties.aland)") perValName
-      transform = (GV.transform . tLookup . tComputePer) []
-      encValPer = GV.color [GV.MName perValName, GV.MmType GV.Quantitative]
+      tFilter = maybe id (\gids -> GV.filter $ GV.FOneOf "properties.geoid" $ GV.Strings $ S.toList gids) incTractsM
+      transform = (GV.transform . tFilter . tLookup . tComputePer) []
+      encValPer = GV.color [GV.MName perValName, GV.MmType GV.Quantitative
+                           , GV.MScale [GV.SDomain (GV.DNumbers [-200, 200]), GV.SScheme "redblue" [0,1]]
+                           ]
       encoding = (GV.encoding . encValPer) []
       mark = GV.mark GV.Geoshape []
       projection = GV.projection [GV.PrType GV.Identity, GV.PrReflectY True]
