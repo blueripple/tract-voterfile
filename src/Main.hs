@@ -25,6 +25,7 @@ import qualified BlueRipple.Model.Election2.ModelRunner as MR
 import qualified BlueRipple.Model.Demographic.DataPrep as DDP
 import qualified BlueRipple.Model.Demographic.EnrichCensus as DMC
 import qualified BlueRipple.Model.Demographic.TableProducts as DTP
+import qualified BlueRipple.Model.Demographic.MarginalStructure as DMS
 import qualified BlueRipple.Model.Demographic.TPModel3 as DTM3
 import qualified BlueRipple.Data.Small.Loaders as BRL
 import qualified BlueRipple.Data.Small.DataFrames as BR
@@ -33,6 +34,7 @@ import qualified BlueRipple.Utilities.KnitUtils as BRK
 import qualified BlueRipple.Configuration as BR
 import qualified BlueRipple.Data.CachingCore as BRCC
 import qualified BlueRipple.Data.LoadersCore as BRLC
+import qualified BlueRipple.Data.Small.DataFrames as BRDF
 import qualified BlueRipple.Data.Types.Demographic as DT
 import qualified BlueRipple.Data.Types.Geographic as GT
 import qualified BlueRipple.Data.Types.Modeling as MT
@@ -96,10 +98,12 @@ templateVars =
 pandocTemplate ∷ K.TemplatePath
 pandocTemplate = K.FullySpecifiedTemplatePath "../../research/pandoc-templates/blueripple_basic.html"
 
+type TractGeoR = [BRDF.Year, GT.StateAbbreviation, GT.TractGeoId]
+
 dmr ::  DM.DesignMatrixRow (F.Record DP.LPredictorsR)
 dmr = MC.tDesignMatrixRow_d
 
-survey :: MC.TurnoutSurvey (F.Record DP.CESByCDR)
+survey :: MC.ActionSurvey (F.Record DP.CESByCDR)
 survey = MC.CESSurvey
 
 aggregation :: MC.SurveyAggregation TE.ECVec
@@ -108,7 +112,6 @@ aggregation = MC.WeightedAggregation MC.ContinuousBinomial
 alphaModel :: MC.Alphas
 alphaModel = MC.St_A_S_E_R_StR  --MC.St_A_S_E_R_AE_AR_ER_StR
 
---type SLDKeyR = '[GT.StateAbbreviation] V.++ BRC.LDLocationR
 type ModeledR = BRC.TractLocationR V.++ '[MR.ModelCI]
 
 main :: IO ()
@@ -123,6 +126,8 @@ main = do
   let knitConfig ∷ K.KnitConfig BRCC.SerializerC BRCC.CacheData Text =
         (K.defaultKnitConfig $ Just cacheDir)
           { K.outerLogPrefix = Just "Tract-VoterFile"
+--          , K.lcSeverity = M.fromList [("KH_Cache", K.Special), ("KH_Serialize", K.Special), ("OptimalWeights", K.Special)]
+--          , K.lcSeverity = M.fromList [("OptimalWeights", K.Special)]
           , K.logIf = BR.knitLogSeverity $ BR.logLevel cmdLine -- K.logDiagnostic
           , K.pandocWriterConfig = pandocWriterConfig
           , K.serializeDict = BRCC.flatSerializeDict
@@ -131,7 +136,8 @@ main = do
   resE ← K.knitHtmls knitConfig $ do
     K.logLE K.Info $ "Command Line: " <> show cmdLine
     let postInfo = BR.PostInfo (BR.postStage cmdLine) (BR.PubTimes BR.Unpublished Nothing)
-    exploreTractVoterfile cmdLine postInfo "PA"
+--    exploreTractVoterfile cmdLine postInfo "PA"
+    modeledRegistrationByState cmdLine "WY"
   case resE of
     Right namedDocs →
       K.writeAllPandocResultsWithInfoAsHtml "" namedDocs
@@ -149,15 +155,15 @@ exploreTractVoterfile cmdLine pi sa = do
   postPaths <- postPaths "TractTest" cmdLine
   BRK.brNewPost postPaths pi "TractTest" $ do
     vfByTract_C <- VF.voterfileByTracts Nothing
-    states <- K.ignoreCacheTimeM BRL.stateAbbrCrosswalkLoader
+--    states <- K.ignoreCacheTimeM BRL.stateAbbrCrosswalkLoader
     tractsByDistrict <- K.ignoreCacheTimeM BRL.tractsByDistrictLoader
 
-    let fipsByState = FL.fold (FL.premap (\r -> (r ^. GT.stateAbbreviation, r ^. GT.stateFIPS)) FL.map) states
-    stateFIPS <- K.knitMaybe ("FIPS lookup failed for " <> sa) $ M.lookup sa fipsByState
+--    let fipsByState = FL.fold (FL.premap (\r -> (r ^. GT.stateAbbreviation, r ^. GT.stateFIPS)) FL.map) states
+--    stateFIPS <- K.knitMaybe ("FIPS lookup failed for " <> sa) $ M.lookup sa fipsByState
     vfByTract <- K.ignoreCacheTime vfByTract_C
 
     K.logLE K.Info $ "Voter Files By Tract has " <> show (length vfByTract) <> " rows."
-    let vfByTractForState = F.filterFrame ((== stateFIPS) . view GT.stateFIPS) vfByTract
+    let vfByTractForState = F.filterFrame ((== sa) . view GT.stateAbbreviation) vfByTract
         (regDem, regRep) = FL.fold ((,) <$> FL.premap (view VF.vFPartyDem) FL.sum <*> FL.premap (view VF.vFPartyRep) FL.sum) vfByTractForState
     K.logLE K.Info $ sa <> " voter Files By Tract has " <> show (length vfByTractForState) <> " rows."
     K.logLE K.Info $ sa <> " has " <> show regDem <> " registered Dems and " <> show regRep <> " registered Republicans."
@@ -179,6 +185,32 @@ exploreTractVoterfile cmdLine pi sa = do
         vfByTractForState
         >>= K.addHvega Nothing Nothing
       pure ()
+
+type ModeledRegistrationR = BRC.TractLocationR V.++ '[MR.ModelCI]
+
+modeledRegistrationByState :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> Text -> K.Sem r () --(F.FrameRec ModeledRegistrationR)
+modeledRegistrationByState cmdLine sa = do
+   let cacheStructure psName = MR.CacheStructure (Right "model/election2/stan/") (Right "model/election2")
+                               psName "AllCells" sa
+       psDataForState :: Text -> DP.PSData  BRC.TractLocationR -> DP.PSData BRC.TractLocationR
+       psDataForState sa = DP.PSData . F.filterFrame ((== sa) . view GT.stateAbbreviation) . DP.unPSData
+
+   modeledACSByTractPSData_C <- modeledACSByTract cmdLine BRC.TY2022
+   let psD_C = psDataForState sa <$>  modeledACSByTractPSData_C
+   K.ignoreCacheTime psD_C >>= BRLC.logFrame . F.takeRows 100 . DP.unPSData
+   let ac = MC.ActionConfig survey (MC.ModelConfig aggregation alphaModel (contramap F.rcast dmr))
+       pc = MC.PrefConfig (MC.ModelConfig aggregation alphaModel (contramap F.rcast dmr))
+
+       regModel psName
+        = MR.runFullModelAH @BRC.TractLocationR 2022 (cacheStructure psName) ac Nothing pc Nothing MR.RegDTargets
+   modeledReg <- K.ignoreCacheTimeM $ regModel (sa <> "_Tracts") psD_C
+   K.logLE K.Info $ "modeledReg:" <> (show $ MC.unPSMap  modeledReg)
+--   K.ignoreCacheTime modeledACSByTractPSData_C >>= BRLC.logFrame . F.takeRows 100 . DP.unPSData
+
+
+
+
+
 
 geoExample :: (K.KnitEffects r, Foldable f)
            => BR.PostPaths Path.Abs
@@ -216,6 +248,8 @@ geoExample pp pi chartID title vc (geoJsonPath, topoJsonFeatureKey) geoid incTra
       mark = GV.mark GV.Geoshape []
       projection = GV.projection [GV.PrType GV.Identity, GV.PrReflectY True]
   pure $ BR.brConfiguredVegaLite vc [FV.title title, geoData, transform, projection, encoding, mark]
+
+
 
 {-
 modelWhiteEvangelicals :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> K.Sem r ()
@@ -275,32 +309,79 @@ modelWhiteEvangelicals cmdLine = do
 
 -}
 
-{-
-modeledACSBySLD :: forall r . (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> BRC.TableYear -> K.Sem r (K.ActionWithCacheTime r (DP.PSData SLDKeyR))
-modeledACSBySLD cmdLine ty = do
+tsModelConfig modelId n =  DTM3.ModelConfig True (DTM3.dmr modelId n)
+                           DTM3.AlphaHierNonCentered DTM3.ThetaSimple DTM3.NormalDist
+
+modeledACSByTract :: forall r . (K.KnitEffects r, BRCC.CacheEffects r)
+                  => BR.CommandLine -> BRC.TableYear -> K.Sem r (K.ActionWithCacheTime r (DP.PSData BRC.TractLocationR))
+modeledACSByTract cmdLine ty = do
   let (srcWindow, cachedSrc) = ACS.acs1Yr2012_22 @r
   (jointFromMarginalPredictorCSR_ASR_C, _) <- DDP.cachedACSa5ByPUMA srcWindow cachedSrc 2022 -- most recent available
                                               >>= DMC.predictorModel3 @'[DT.CitizenC] @'[DT.Age5C] @DMC.SRCA @DMC.SR
                                               (Right "CSR_ASR_ByPUMA")
                                               (Right "model/demographic/csr_asr_PUMA")
                                               (DTM3.Model $ tsModelConfig "CSR_ASR_ByPUMA" 71) -- use model not just mean
+                                              False -- do not whiten
                                               Nothing Nothing Nothing . fmap (fmap F.rcast)
   (jointFromMarginalPredictorCASR_ASE_C, _) <- DDP.cachedACSa5ByPUMA srcWindow cachedSrc 2022 -- most recent available
                                                >>= DMC.predictorModel3 @[DT.CitizenC, DT.Race5C] @'[DT.Education4C] @DMC.ASCRE @DMC.AS
                                                (Right "CASR_SER_ByPUMA")
                                                (Right "model/demographic/casr_ase_PUMA")
                                                (DTM3.Model $ tsModelConfig "CASR_ASE_ByPUMA" 141) -- use model not just mean
+                                               False -- do not whiten
                                                Nothing Nothing Nothing . fmap (fmap F.rcast)
-  (acsCASERBySLD, _products) <- BRC.censusTablesForSLDs 2024 ty
-                                >>= DMC.predictedCensusCASER' (DTP.viaOptimalWeights DTP.euclideanFull) (Right "model/election2/sldDemographics")
+  tracts_C <- BRC.loadACS_2017_2022_Tracts
+--  K.logLE K.Info "Sample ACS Tract Rows"
+--  K.ignoreCacheTime tracts_C >>= BRLC.logFrame . F.takeRows 100 . BRC.ageSexRace
+  let optimalWeightsConfig = DTP.defaultOptimalWeightsConfig {DTP.owcMaxTimeM = Just 0.1, DTP.owcProbRelTolerance = 1e-4}
+  (acsCASERByTract, _products) <- BRC.loadACS_2017_2022_Tracts
+                                >>= DMC.predictedCensusCASER' (pure . view GT.stateAbbreviation)
+                                DMS.GMDensity
+                                (DTP.viaOptimalWeights optimalWeightsConfig DTP.euclideanFull) (Right "model/election2/tractDemographics")
                                 jointFromMarginalPredictorCSR_ASR_C
                                 jointFromMarginalPredictorCASR_ASE_C
-  BRCC.retrieveOrMakeD ("model/election2/data/sldPSData" <> BRC.yearsText 2024 ty <> ".bin") acsCASERBySLD
-    $ \x -> DP.PSData . fmap F.rcast <$> (BRL.addStateAbbrUsingFIPS $ F.filterFrame ((== DT.Citizen) . view DT.citizenC) x)
+  BRCC.retrieveOrMakeD ("model/election2/data/tractPSData" <> BRC.yearsText 2024 ty <> ".bin") acsCASERByTract
+    $ \x -> pure . DP.PSData . fmap F.rcast $ (F.filterFrame ((== DT.Citizen) . view DT.citizenC) x)
 
+modeledACSByTract' :: forall r . (K.KnitEffects r, BRCC.CacheEffects r)
+                   => BR.CommandLine -> BRC.TableYear -> K.Sem r (K.ActionWithCacheTime r (DP.PSData BRC.TractLocationR))
+modeledACSByTract' cmdLine ty = do
+  let (srcWindow, cachedSrc) = ACS.acs1Yr2012_22 @r
+  (jointFromMarginalPredictorCSR_ASR_C, _) <- DDP.cachedACSa5ByPUMA srcWindow cachedSrc 2022 -- most recent available
+                                              >>= DMC.predictorModel3 @'[DT.CitizenC] @'[DT.Age5C] @DMC.SRCA @DMC.SR
+                                              (Right "CSR_ASR_ByPUMA")
+                                              (Right "model/demographic/csr_asr_PUMA")
+                                              (DTM3.Model $ tsModelConfig "CSR_ASR_ByPUMA" 71) -- use model not just mean
+                                              False -- do not whiten
+                                              Nothing Nothing Nothing . fmap (fmap F.rcast)
+  (jointFromMarginalPredictorCASR_ASE_C, _) <- DDP.cachedACSa5ByPUMA srcWindow cachedSrc 2022 -- most recent available
+                                               >>= DMC.predictorModel3 @[DT.CitizenC, DT.Race5C] @'[DT.Education4C] @DMC.ASCRE @DMC.AS
+                                               (Right "CASR_SER_ByPUMA")
+                                               (Right "model/demographic/casr_ase_PUMA")
+                                               (DTM3.Model $ tsModelConfig "CASR_ASE_ByPUMA" 141) -- use model not just mean
+                                               False -- do not whiten
+                                               Nothing Nothing Nothing . fmap (fmap F.rcast)
+  tractTables_C <- BRC.loadACS_2017_2022_Tracts
+  let tractsCSR_C = fmap (DMC.recodeCSR @TractGeoR . fmap F.rcast) $ fmap BRC.citizenshipSexRace tractTables_C
+      tractsASR_C =  fmap (DMC.filterA6FrameToA5 .  DMC.recodeA6SR @TractGeoR . fmap F.rcast) $ fmap BRC.ageSexRace tractTables_C
+      tractsSER_C = fmap (DMC.recodeSER @TractGeoR . fmap F.rcast) $ fmap BRC.sexEducationRace tractTables_C
+
+  -- CSR x ASR -> CASR
+  let casrProdDeps = (,) <$> tractsCSR_C <*> tractsASR_C
+  casrProdOWZ_C <- BRCC.retrieveOrMakeD "analysis/tract-voterfile/casrProdOWZ" casrProdDeps $ \(csr, asr) -> do
+    let csrOWZ = FL.fold (DMC.orderedWithZeros @TractGeoR @DMC.CSR) csr
+        asrOWZ = FL.fold (DMC.orderedWithZeros @TractGeoR @DMC.ASR) asr
+    K.logTiming (K.logLE K.Info) "CSR x ASR -> OWZs -> Product" $ DMC.tableProductsOWZ DMS.GMDensity csrOWZ asrOWZ
+  let casrFullDeps = (,) <$> jointFromMarginalPredictorCSR_ASR_C <*> casrProdOWZ_C
+
+  srcaFullOWZ_C <- BRCC.retrieveOrMakeD "analysis/tract-voterfile/casrFullOWZ" casrFullDeps $ \(predCSR_ASR, casrProd) -> do
+    let cMatrix = logitMarginalsCMatrix @DMC.SR @'[DT.CitizenC] @'[DT.Age5C]
+        covAndProdS = DMC.covariatesAndProdVs (DMC.tp3CovariatesAndProdVs @TractGeoR @DMC.SRCA cMatrix)
+
+  pure()
 
 type ASRR = '[BR.Year, GT.StateAbbreviation] V.++ BRC.TractLocationR V.++ [DT.Age6C, DT.SexC, BRC.RaceEthnicityC, DT.PopCount]
--}
+
 {-
 givenASRBySLD :: (K.KnitEffects r, BRCC.CacheEffects r) => BRC.TableYear -> K.Sem r (F.FrameRec ASRR)
 givenASRBySLD ty = do

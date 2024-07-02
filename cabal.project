@@ -1,4 +1,4 @@
-packages: ./ ../../libs/model-demographic ../../libs/data-RDH-voterfiles ../../libs/small-data-sets
+packages: ./ ../../libs/model-demographic ../../libs/model-election2
 jobs: 4
 with-compiler: ghc
 profiling: False
@@ -16,7 +16,7 @@ allow-newer: polysemy-zoo:ghc-prim, streamly-core
 flags: +streamly9
 
 import: ../../libs/cabal_repo_imports/post-tools.project
---import: ../../libs/cabal_repo_imports/small-data-sets.project
+import: ../../libs/cabal_repo_imports/small-data-sets.project
 import: ../../libs/cabal_repo_imports/data-types.project
 import: ../../libs/cabal_repo_imports/data-tools.project
 import: ../../libs/cabal_repo_imports/data-loading.project
@@ -25,9 +25,10 @@ import: ../../libs/cabal_repo_imports/data-ACS-Tables.project
 import: ../../libs/cabal_repo_imports/data-ACS-PUMS.project
 import: ../../libs/cabal_repo_imports/data-CPS-VS.project
 import: ../../libs/cabal_repo_imports/data-CES.project
+import: ../../libs/cabal_repo_imports/data-RDH-voterfiles.project
 import: ../../libs/cabal_repo_imports/model-tools.project
 --import: ../../libs/cabal_repo_imports/model-demographic.project
-import: ../../libs/cabal_repo_imports/model-election2.project
+--import: ../../libs/cabal_repo_imports/model-election2.project
 import: ../../libs/cabal_repo_imports/haskell-stan.project
 import: ../../libs/cabal_repo_imports/knit-haskell.project
 import: ../../libs/cabal_repo_imports/Frames-streamly.project
