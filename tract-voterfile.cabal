@@ -19,7 +19,7 @@ source-repository head
 
 executable tract-voterfile
   hs-source-dirs: src
-  ghc-options: -Wall
+  ghc-options: -Wall -O2 -fdicts-strict -fmax-worker-args=16 -fspec-constr-recursive=16 -threaded
   main-is: Main.hs
   build-depends:
      blueripple-post-tools
