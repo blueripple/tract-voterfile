@@ -1,4 +1,4 @@
-packages: ./ ../../libs/model-demographic ../../libs/model-election2  ~/DataScience/data-science-utils ~/DataScience/nlopt-haskell
+packages: ./ ../../libs/model-demographic ../../libs/model-election2  ~/DataScience/data-science-utils ~/DataScience/nlopt-haskell ../../libs/data-RDH-voterfiles ../../libs/data-loading ../../libs/data-ACS-Tables
 jobs: 4
 with-compiler: ghc
 profiling: False
@@ -19,13 +19,13 @@ import: ../../libs/cabal_repo_imports/post-tools.project
 import: ../../libs/cabal_repo_imports/small-data-sets.project
 import: ../../libs/cabal_repo_imports/data-types.project
 import: ../../libs/cabal_repo_imports/data-tools.project
-import: ../../libs/cabal_repo_imports/data-loading.project
+--import: ../../libs/cabal_repo_imports/data-loading.project
 import: ../../libs/cabal_repo_imports/data-visualizations.project
-import: ../../libs/cabal_repo_imports/data-ACS-Tables.project
+--import: ../../libs/cabal_repo_imports/data-ACS-Tables.project
 import: ../../libs/cabal_repo_imports/data-ACS-PUMS.project
 import: ../../libs/cabal_repo_imports/data-CPS-VS.project
 import: ../../libs/cabal_repo_imports/data-CES.project
-import: ../../libs/cabal_repo_imports/data-RDH-voterfiles.project
+--import: ../../libs/cabal_repo_imports/data-RDH-voterfiles.project
 import: ../../libs/cabal_repo_imports/model-tools.project
 --import: ../../libs/cabal_repo_imports/model-demographic.project
 --import: ../../libs/cabal_repo_imports/model-election2.project

@@ -60,6 +60,7 @@ import qualified Frames.SimpleJoins as FJ
 import qualified Frames.Constraints as FC
 import qualified Frames.Streamly.TH as FS
 import qualified Frames.Streamly.CSV as FCSV
+import qualified Frames.Streamly.InCore as FSI
 
 import Frames.Streamly.Streaming.Streamly (StreamlyStream, Stream)
 
@@ -67,6 +68,7 @@ import qualified Control.Foldl as FL
 import Control.Lens (view, (^.))
 
 import qualified Data.Map.Strict as M
+import qualified Data.Map.Merge.Strict as MM
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Vinyl as V
@@ -85,6 +87,14 @@ import qualified Graphics.Vega.VegaLite.JSON as VJ
 
 import Path (Dir, Rel)
 import qualified Path
+import qualified Frames.Folds as FF
+
+FS.declareColumn "Registered" ''Int
+FS.declareColumn "Voted20"      ''Int
+FS.declareColumn "Voted22"      ''Int
+FS.declareColumn "RegistrationP" ''MT.ConfidenceInterval
+FS.declareColumn "TurnoutP" ''MT.ConfidenceInterval
+FS.declareColumn "DemIdP" ''MT.ConfidenceInterval
 
 templateVars ∷ Map String String
 templateVars =
@@ -137,12 +147,91 @@ main = do
     K.logLE K.Info $ "Command Line: " <> show cmdLine
     let postInfo = BR.PostInfo (BR.postStage cmdLine) (BR.PubTimes BR.Unpublished Nothing)
 --    exploreTractVoterfile cmdLine postInfo "PA"
-    modeledRegistrationByState cmdLine "PA"
+--    regPAMap_C <- modeledRegistrationForState cmdLine "PA"
+--    K.ignoreCacheTime regPAMap_C >>= putTextLn . show . MC.unPSMap
+    vfAndModeledPA_C <- vfAndModeledByState cmdLine "GA"
+    K.ignoreCacheTime vfAndModeledPA_C >>= BRLC.logFrame . F.takeRows 100
   case resE of
     Right namedDocs →
       K.writeAllPandocResultsWithInfoAsHtml "" namedDocs
     Left err → putTextLn $ "Pandoc Error: " <> Pandoc.renderError err
 
+
+type VFAndModeledR = [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount, Registered, Voted20, Voted22, RegistrationP, TurnoutP, DemIdP]
+
+vfAndModeledByState :: (K.KnitEffects r, BRCC.CacheEffects r)
+                       =>  BR.CommandLine -> Text -> K.Sem r (K.ActionWithCacheTime r (F.FrameRec VFAndModeledR))
+vfAndModeledByState cmdLine sa = do
+   let geoid r = let x = r ^. GT.tractGeoId in if x < 10000000000 then "0" <> show x else show x
+       filterByState :: (FC.ElemsOf rs '[GT.StateAbbreviation], FSI.RecVec rs) => F.FrameRec rs -> F.FrameRec rs
+       filterByState = F.filterFrame ((== sa) . view GT.stateAbbreviation)
+       lt = K.logTiming (K.logLE K.Info)
+   K.logLE K.Info "Modeled ACS Data"
+   modeledACSByTractPSData_C <- modeledACSByTract cmdLine BRC.TY2022
+   K.logLE K.Info "Aggregate ACS Data for CVAPs"
+   cvapCounts_C <- fmap filterByState
+                   <$> BRCC.retrieveOrMakeFrame "analysis/tract-voterfile/tractCVAPs.bin" modeledACSByTractPSData_C (lt "tractCVAPs" . pure . tractCVAPs)
+   K.logLE K.Info "load, filter and summarize voterfile data"
+   vfByTract_C <- fmap (vfRegVoted . filterByState) <$> VF.voterfileByTracts Nothing
+   K.logLE K.Info "Model registration"
+   regForState_C <- modeledRegistrationForState cmdLine sa
+   K.logLE K.Info "Model turnout"
+   turnoutForState_C <- modeledTurnoutForState cmdLine sa
+   K.logLE K.Info "Model partisan Id"
+   demIdForState_C <- modeledPartisanIdOfRegForState cmdLine sa
+   let modeledRegTurnoutIdCK = "analysis/tract-voterfile/" <> sa <> "/modeledRegTurnoutId.bin"
+       regTurnoutIdDeps = (,,) <$> regForState_C <*> turnoutForState_C <*> demIdForState_C
+   K.logLE K.Info "Merge models"
+   regTurnoutIdByTractForState_C <- BRCC.retrieveOrMakeFrame modeledRegTurnoutIdCK regTurnoutIdDeps
+                                (lt "modelMerge" . K.knitEither . \(r, t, i) -> mergeRegTurnoutId r t i)
+
+   let joinDeps = (,,) <$> cvapCounts_C <*> vfByTract_C <*> regTurnoutIdByTractForState_C
+       vfAndModeledCK = "analysis/tract-voterfile/" <> sa <> "/vfAndModeled.bin"
+   K.logLE K.Info "Join..."
+   BRCC.retrieveOrMakeFrame vfAndModeledCK joinDeps (lt "CVAP + VF + Model join" . K.knitEither . \(c, v, m) -> joinCVAP_VF_Model c v m)
+--   (joined, missingVFCount, missingVFCount_model) = FJ.leftJoin3WithMissing @BRC.TractLocationR vfByTract_C
+
+
+joinCVAP_VF_Model :: F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount]
+                  -> F.FrameRec (BRC.TractLocationR V.++ [Registered, Voted20, Voted22])
+                  -> F.FrameRec (BRC.TractLocationR V.++ [RegistrationP, TurnoutP, DemIdP])
+                  -> Either Text (F.FrameRec VFAndModeledR)
+joinCVAP_VF_Model cvap vf model = do
+  let (joined, missingCVAP_VF, missingModel) = FJ.leftJoin3WithMissing @BRC.TractLocationR cvap vf model
+  when (not $ null missingCVAP_VF) $ Left $ "Missing keys in CVAP/VF join: " <> show missingCVAP_VF
+  when (not $ null missingModel) $ Left $ "Missing keys in CVAP+VF/Model join: " <> show missingModel
+  pure joined
+
+vfRegVoted :: F.Frame VF.VF_Raw -> F.FrameRec (BRC.TractLocationR V.++ [Registered, Voted20, Voted22])
+vfRegVoted = fmap (F.rcast . FT.mutate f)
+  where
+    totalReg r = FT.recordSingleton @Registered $ r ^. VF.partyDem + r ^. VF.partyRep + r ^. VF.partyOth
+    totalVoted20 r = FT.recordSingleton @Voted20 $ r ^. VF.g20201103VotedAll
+    totalVoted22 r = FT.recordSingleton @Voted22 $ r ^. VF.g20221108VotedAll
+    f r = totalReg r F.<+> totalVoted20 r F.<+> totalVoted22 r
+
+regIdMapToFrame :: Map (F.Record BRC.TractLocationR) (F.Record [RegistrationP, TurnoutP, DemIdP]) -> F.FrameRec (BRC.TractLocationR V.++ [RegistrationP, TurnoutP, DemIdP])
+regIdMapToFrame = F.toFrame . fmap (uncurry V.rappend) . M.toList
+
+mergeRegTurnoutId :: MC.PSMap BRC.TractLocationR MT.ConfidenceInterval
+                     -> MC.PSMap BRC.TractLocationR MT.ConfidenceInterval
+                     -> MC.PSMap BRC.TractLocationR MT.ConfidenceInterval
+                     -> Either Text (F.FrameRec (BRC.TractLocationR V.++  [RegistrationP, TurnoutP, DemIdP]))
+mergeRegTurnoutId regMap turnoutMap idMap = do
+  let  missing t = MM.traverseMissing $ \k _ -> Left $ "Missing key=" <> show k <> " in " <> t
+       hasRT _ regCI tCI = (regCI, tCI)
+       hasRTI _ (r, t) i = r F.&: t F.&: i F.&: V.RNil
+  mergeRT <- MM.mergeA (missing "turnoutMap") (missing "regMap") (MM.zipWithMatched hasRT) (MC.unPSMap regMap) (MC.unPSMap turnoutMap)
+  regIdMapToFrame <$> MM.mergeA (missing "idMap") (missing "rtMap") (MM.zipWithMatched hasRTI) mergeRT (MC.unPSMap idMap)
+
+
+tractCVAPs :: DP.PSData BRC.TractLocationR -> F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount]
+tractCVAPs = FL.fold fld . DP.unPSData where
+  fld = FMR.concatFold
+        $ FMR.mapReduceFold
+        FMR.noUnpack
+        (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
+        (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
 
 exploreTractVoterfile :: (K.KnitMany r, K.KnitEffects r, BRCC.CacheEffects r)
                       => BR.CommandLine
@@ -164,13 +253,13 @@ exploreTractVoterfile cmdLine pi sa = do
 
     K.logLE K.Info $ "Voter Files By Tract has " <> show (length vfByTract) <> " rows."
     let vfByTractForState = F.filterFrame ((== sa) . view GT.stateAbbreviation) vfByTract
-        (regDem, regRep) = FL.fold ((,) <$> FL.premap (view VF.vFPartyDem) FL.sum <*> FL.premap (view VF.vFPartyRep) FL.sum) vfByTractForState
+        (regDem, regRep) = FL.fold ((,) <$> FL.premap (view VF.partyDem) FL.sum <*> FL.premap (view VF.partyRep) FL.sum) vfByTractForState
     K.logLE K.Info $ sa <> " voter Files By Tract has " <> show (length vfByTractForState) <> " rows."
     K.logLE K.Info $ sa <> " has " <> show regDem <> " registered Dems and " <> show regRep <> " registered Republicans."
 
     let regDiff r =
-          let ds = realToFrac (r ^. VF.vFPartyDem)
-              rs = realToFrac (r ^. VF.vFPartyRep)
+          let ds = realToFrac (r ^. VF.partyDem)
+              rs = realToFrac (r ^. VF.partyRep)
           in ds - rs --if ds + rs > 0 then (ds - rs) / (ds + rs) else 0
     for_ [1, 7, 8, 10, 12, 17] $ \cd -> do
       let cdT = show cd
@@ -186,10 +275,52 @@ exploreTractVoterfile cmdLine pi sa = do
         >>= K.addHvega Nothing Nothing
       pure ()
 
+
 type ModeledRegistrationR = BRC.TractLocationR V.++ '[MR.ModelCI]
 
-modeledRegistrationByState :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> Text -> K.Sem r () --(F.FrameRec ModeledRegistrationR)
-modeledRegistrationByState cmdLine sa = do
+modeledRegistrationForState :: (K.KnitEffects r, BRCC.CacheEffects r)
+                           => BR.CommandLine
+                           -> Text
+                           -> K.Sem r (KC.ActionWithCacheTime r (MC.PSMap BRC.TractLocationR MT.ConfidenceInterval))
+modeledRegistrationForState cmdLine sa = do
+   let cacheStructure psName = MR.CacheStructure (Right "model/election2/stan/") (Right "model/election2")
+                               psName "AllCells" sa
+       psDataForState :: Text -> DP.PSData  BRC.TractLocationR -> DP.PSData BRC.TractLocationR
+       psDataForState sa = DP.PSData . F.filterFrame ((== sa) . view GT.stateAbbreviation) . DP.unPSData
+
+   modeledACSByTractPSData_C <- modeledACSByTract cmdLine BRC.TY2022
+   let psD_C = psDataForState sa <$>  modeledACSByTractPSData_C
+--   K.ignoreCacheTime psD_C >>= BRLC.logFrame . F.takeRows 100 . DP.unPSData
+
+   let ac = MC.ActionConfig survey (MC.ModelConfig aggregation alphaModel (contramap F.rcast dmr))
+       regModel psName
+        = MR.runActionModelAH @BRC.TractLocationR 2022 (cacheStructure psName) MC.Reg ac Nothing
+   regModel (sa <> "_Tracts") psD_C
+
+modeledTurnoutForState :: (K.KnitEffects r, BRCC.CacheEffects r)
+                           => BR.CommandLine
+                           -> Text
+                           -> K.Sem r (KC.ActionWithCacheTime r (MC.PSMap BRC.TractLocationR MT.ConfidenceInterval))
+modeledTurnoutForState cmdLine sa = do
+   let cacheStructure psName = MR.CacheStructure (Right "model/election2/stan/") (Right "model/election2")
+                               psName "AllCells" sa
+       psDataForState :: Text -> DP.PSData  BRC.TractLocationR -> DP.PSData BRC.TractLocationR
+       psDataForState sa = DP.PSData . F.filterFrame ((== sa) . view GT.stateAbbreviation) . DP.unPSData
+
+   modeledACSByTractPSData_C <- modeledACSByTract cmdLine BRC.TY2022
+   let psD_C = psDataForState sa <$>  modeledACSByTractPSData_C
+--   K.ignoreCacheTime psD_C >>= BRLC.logFrame . F.takeRows 100 . DP.unPSData
+
+   let ac = MC.ActionConfig survey (MC.ModelConfig aggregation alphaModel (contramap F.rcast dmr))
+       turnoutModel psName
+        = MR.runActionModelAH @BRC.TractLocationR 2022 (cacheStructure psName) MC.Vote ac Nothing
+   turnoutModel (sa <> "_Tracts") psD_C
+
+modeledPartisanIdOfRegForState :: (K.KnitEffects r, BRCC.CacheEffects r)
+                           => BR.CommandLine
+                           -> Text
+                           -> K.Sem r (KC.ActionWithCacheTime r (MC.PSMap BRC.TractLocationR MT.ConfidenceInterval))
+modeledPartisanIdOfRegForState cmdLine sa = do
    let cacheStructure psName = MR.CacheStructure (Right "model/election2/stan/") (Right "model/election2")
                                psName "AllCells" sa
        psDataForState :: Text -> DP.PSData  BRC.TractLocationR -> DP.PSData BRC.TractLocationR
@@ -202,11 +333,9 @@ modeledRegistrationByState cmdLine sa = do
    let ac = MC.ActionConfig survey (MC.ModelConfig aggregation alphaModel (contramap F.rcast dmr))
        pc = MC.PrefConfig (MC.ModelConfig aggregation alphaModel (contramap F.rcast dmr))
 
-       regModel psName
+       idModel psName
         = MR.runFullModelAH @BRC.TractLocationR 2022 (cacheStructure psName) ac Nothing pc Nothing MR.RegDTargets
-   modeledReg <- K.ignoreCacheTimeM $ regModel (sa <> "_Tracts") psD_C
-   K.logLE K.Info $ "modeledReg:" <> (show $ MC.unPSMap  modeledReg)
-  -- K.ignoreCacheTime modeledACSByTractPSData_C >>= BRLC.logFrame . F.takeRows 100 . DP.unPSData
+   idModel (sa <> "_Tracts") psD_C
 
 geoExample :: (K.KnitEffects r, Foldable f)
            => BR.PostPaths Path.Abs
