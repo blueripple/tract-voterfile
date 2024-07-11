@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -83,7 +84,7 @@ import qualified Graphics.Vega.VegaLite as GV
 import qualified Graphics.Vega.VegaLite.Compat as FV
 import qualified Graphics.Vega.VegaLite.Configuration as FV
 import qualified Graphics.Vega.VegaLite.JSON as VJ
-
+import GHC.TypeLits (Symbol)
 
 import Path (Dir, Rel)
 import qualified Path
@@ -95,6 +96,15 @@ FS.declareColumn "Voted22"      ''Int
 FS.declareColumn "RegistrationP" ''MT.ConfidenceInterval
 FS.declareColumn "TurnoutP" ''MT.ConfidenceInterval
 FS.declareColumn "DemIdP" ''MT.ConfidenceInterval
+
+FS.declareColumn "CitPop" ''Int
+FS.declareColumn "AllPop" ''Int
+FS.declareColumn "ADV" '' Double
+FS.declareColumn "RR" '' Double
+FS.declareColumn "MRR" '' Double
+FS.declareColumn "RGap" '' Double
+FS.declareColumn "MRGap" '' Double
+
 
 templateVars ∷ Map String String
 templateVars =
@@ -149,12 +159,50 @@ main = do
 --    exploreTractVoterfile cmdLine postInfo "PA"
 --    regPAMap_C <- modeledRegistrationForState cmdLine "PA"
 --    K.ignoreCacheTime regPAMap_C >>= putTextLn . show . MC.unPSMap
-    vfAndModeledPA_C <- vfAndModeledByState cmdLine "GA"
-    K.ignoreCacheTime vfAndModeledPA_C >>= BRLC.logFrame . F.takeRows 100
+    vfAndModeledPA_C <- vfAndModeledByState cmdLine "PA"
+    K.ignoreCacheTime vfAndModeledPA_C >>= writeVFAndModeledToCSV "PA/PA"
+--    compareCVAPs cmdLine "GA"
   case resE of
     Right namedDocs →
       K.writeAllPandocResultsWithInfoAsHtml "" namedDocs
     Left err → putTextLn $ "Pandoc Error: " <> Pandoc.renderError err
+
+
+writeVFAndModeledToCSV :: K.KnitEffects r => Text -> F.FrameRec VFAndModeledR -> K.Sem r ()
+writeVFAndModeledToCSV csvName f = do
+  let adv r = realToFrac (r ^. registered - r ^. voted20) * (MT.ciMid (r ^. demIdP) - 0.5)
+      rr r = realToFrac (r ^. registered) / realToFrac (r ^. DT.popCount)
+      mrr r =  MT.ciMid (r ^. registrationP) --realToFrac (r ^. registered) / realToFrac (r ^. DT.popCount) / MT.ciMid (r ^. registrationP)
+      pop = realToFrac . view DT.popCount
+      avgRRFld = (/) <$> FL.premap (\r -> pop r * rr r) FL.sum <*> FL.premap pop FL.sum
+      avfMRRFld = (/) <$> FL.premap (\r -> pop r * mrr r) FL.sum <*> FL.premap pop FL.sum
+      adjFld = (/) <$> avgRRFld <*> avfMRRFld
+      (adj, avgRR) = FL.fold ((,) <$> adjFld <*> avgRRFld) f
+      advC = FT.recordSingleton @ADV . adv
+      rrC = FT.recordSingleton @RR . rr
+      rGapC r = FT.recordSingleton @RGap $ (rr r - avgRR) * pop r
+      mrrC r = FT.recordSingleton @MRR $ adj * mrr r
+      mrGapC r = FT.recordSingleton @MRGap $ (rr r - adj * mrr r) * pop r
+      addCols r = r  F.<+> rrC r F.<+> rGapC r F.<+> mrrC r F.<+> mrGapC r F.<+> advC r
+  let wText = FCSV.formatTextAsIs
+      printNum n m = PF.printf ("%" <> show n <> "." <> show m <> "g")
+      wPrintf :: (V.KnownField t, V.Snd t ~ Double) => Int -> Int -> V.Lift (->) V.ElField (V.Const Text) t
+      wPrintf n m = FCSV.liftFieldFormatter $ toText @String . printNum n m
+      wCI :: (V.KnownField t, V.Snd t ~ MT.ConfidenceInterval) => Int -> Int -> V.Lift (->) V.ElField (V.Const Text) t
+      wCI n m = FCSV.liftFieldFormatter
+                $ toText @String .
+                \ci -> printNum n m (100 * MT.ciMid ci)
+
+      format = FCSV.formatTextAsIs V.:& FCSV.formatWithShow V.:& FCSV.formatWithShow
+               V.:& FCSV.formatWithShow V.:& FCSV.formatWithShow V.:& FCSV.formatWithShow
+               V.:& wCI 2 2 V.:& wCI 2 2 V.:& wCI 2 2
+               V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& V.RNil
+      newHeaderMap = M.fromList [("StateAbbreviation", "State")]
+
+  K.liftKnit @IO
+    $ FCSV.writeLines (toString $ "../../ModeledTracts/" <> csvName <> ".csv")
+    $ FCSV.streamSV' @_ @(StreamlyStream Stream) newHeaderMap format ","
+    $ FCSV.foldableToStream (fmap addCols f)
 
 
 type VFAndModeledR = [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount, Registered, Voted20, Voted22, RegistrationP, TurnoutP, DemIdP]
@@ -166,9 +214,9 @@ vfAndModeledByState cmdLine sa = do
        filterByState :: (FC.ElemsOf rs '[GT.StateAbbreviation], FSI.RecVec rs) => F.FrameRec rs -> F.FrameRec rs
        filterByState = F.filterFrame ((== sa) . view GT.stateAbbreviation)
        lt = K.logTiming (K.logLE K.Info)
-   K.logLE K.Info "Modeled ACS Data"
-   modeledACSByTractPSData_C <- modeledACSByTract cmdLine BRC.TY2022
+--   K.logLE K.Info "Modeled ACS Data"
    K.logLE K.Info "Aggregate ACS Data for CVAPs"
+   modeledACSByTractPSData_C <- modeledACSByTract cmdLine BRC.TY2022
    cvapCounts_C <- fmap filterByState
                    <$> BRCC.retrieveOrMakeFrame "analysis/tract-voterfile/tractCVAPs.bin" modeledACSByTractPSData_C (lt "tractCVAPs" . pure . tractCVAPs)
    K.logLE K.Info "load, filter and summarize voterfile data"
@@ -225,13 +273,6 @@ mergeRegTurnoutId regMap turnoutMap idMap = do
   regIdMapToFrame <$> MM.mergeA (missing "idMap") (missing "rtMap") (MM.zipWithMatched hasRTI) mergeRT (MC.unPSMap idMap)
 
 
-tractCVAPs :: DP.PSData BRC.TractLocationR -> F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount]
-tractCVAPs = FL.fold fld . DP.unPSData where
-  fld = FMR.concatFold
-        $ FMR.mapReduceFold
-        FMR.noUnpack
-        (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
-        (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
 
 exploreTractVoterfile :: (K.KnitMany r, K.KnitEffects r, BRCC.CacheEffects r)
                       => BR.CommandLine
@@ -469,6 +510,7 @@ modeledACSByTract' cmdLine ty = do
     $ \x -> pure . DP.PSData . fmap F.rcast $ (F.filterFrame ((== DT.Citizen) . view DT.citizenC) x)
 -}
 
+
 modeledACSByTract :: forall r . (K.KnitEffects r, BRCC.CacheEffects r)
                    => BR.CommandLine -> BRC.TableYear -> K.Sem r (K.ActionWithCacheTime r (DP.PSData BRC.TractLocationR))
 modeledACSByTract cmdLine ty = do
@@ -575,3 +617,96 @@ postPaths t cmdLine = do
     (postInputs postSpecificP)
     (postLocalDraft postSpecificP mRelSubDir)
     (postOnline postSpecificP)
+
+
+compareCVAPs :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> Text -> K.Sem r ()
+compareCVAPs cmdLine sa = do
+  let filterByState :: (FC.ElemsOf rs '[GT.StateAbbreviation], FSI.RecVec rs) => F.FrameRec rs -> F.FrameRec rs
+      filterByState = F.filterFrame ((== sa) . view GT.stateAbbreviation)
+      lt = K.logTiming (K.logLE K.Info)
+  modeledACSByTractPSData_C <- modeledACSByTract cmdLine BRC.TY2022
+  cvapFromFull_C <- fmap filterByState
+                    <$> BRCC.retrieveOrMakeFrame "analysis/tract-voterfile/tractCVAPs.bin" modeledACSByTractPSData_C (lt "tractCVAPs" . pure . tractCVAPs)
+  fullC <- K.ignoreCacheTime cvapFromFull_C
+  tractTables_C <- BRC.loadACS_2017_2022_Tracts
+  tractTables <- K.ignoreCacheTime tractTables_C
+  let (recodedC, recodedAll) = tractCVAPFromRecodedCSR tractTables
+      (csrC, csrAll) = tractCVAPFromCSR tractTables
+      aseAll = tractCVAPFromASE tractTables
+      cL = zip3 (toList fullC) (toList (filterByState recodedC)) $ toList (filterByState csrC)
+      allL = zip3 (toList (filterByState recodedAll)) (toList (filterByState csrAll)) $ toList (filterByState aseAll)
+  putTextLn $ show cL
+  putTextLn $ show allL
+
+
+
+
+tractCVAPs :: DP.PSData BRC.TractLocationR -> F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount]
+tractCVAPs = FL.fold fld . DP.unPSData where
+  fld = FMR.concatFold
+        $ FMR.mapReduceFold
+        FMR.noUnpack
+        (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
+        (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
+
+
+tractCVAPFromCSR :: BRC.LoadedCensusTablesByTract
+                 -> (F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount]
+                    , F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount])
+tractCVAPFromCSR ct = FL.fold ((,) <$> fldC <*> fldAll) $ BRC.citizenshipSexRace ct
+  where
+    fldC = FMR.concatFold
+           $ FMR.mapReduceFold
+           (FMR.unpackFilterOnField @BRC.CitizenshipC (/= BRC.NonCitizen))
+           (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
+           (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
+    fldAll = FMR.concatFold
+             $ FMR.mapReduceFold
+             FMR.noUnpack
+             (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
+             (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
+
+
+tractCVAPFromASE :: BRC.LoadedCensusTablesByTract
+                 -> (F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount])
+tractCVAPFromASE ct = FL.fold fldAll $ BRC.ageSexEducation ct
+  where
+    fldAll = FMR.concatFold
+             $ FMR.mapReduceFold
+             FMR.noUnpack
+             (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
+             (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
+
+
+tractCVAPFromRecodedCSR :: BRC.LoadedCensusTablesByTract
+                        -> (F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount]
+                           ,F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount]
+                           )
+tractCVAPFromRecodedCSR ct = FL.fold ((,) <$> fldC <*> fldAll) $ DMC.recodeCSR @[GT.StateAbbreviation, GT.TractGeoId] $ BRC.citizenshipSexRace ct
+  where
+    fldC = FMR.concatFold
+           $ FMR.mapReduceFold
+           (FMR.unpackFilterOnField @DT.CitizenC (== DT.Citizen))
+           (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
+           (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
+    fldAll = FMR.concatFold
+             $ FMR.mapReduceFold
+             FMR.noUnpack
+             (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
+             (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
+
+tractCVAPFromCSR_ASR :: (K.KnitEffects r, BRCC.CacheEffects r)
+                     => BRC.LoadedCensusTablesByTract -> K.Sem r (F.FrameRec [GT.StateAbbreviation, GT.TractGeoId, DT.PopCount])
+tractCVAPFromCSR_ASR ct = do
+  let
+    csr =  DMC.recodeCSR @BRC.TractLocationR  $ BRC.citizenshipSexRace ct
+    asr = fmap (F.rcast @(TractGeoR V.++ DMC.KeysWD DMC.ASR)) . DMC.filterA6FrameToA5 .  DMC.recodeA6SR @BRC.TractLocationR $ BRC.ageSexRace ct
+    srcOWZ = FL.fold (DMC.orderedWithZeros @TractGeoR @DMC.SRC @DMC.CSR) csr
+    sraOWZ = FL.fold (DMC.orderedWithZeros @TractGeoR @DMC.SRA @DMC.ASR) asr
+  (DMC.OrderedWithZeros srca _) <-  DMC.tableProductsOWZ @TractGeoR @DMC.SR @'[DT.CitizenC] @'[DT.Age5C] DMS.GMDensity srcOWZ sraOWZ
+  let fld = FMR.concatFold
+        $ FMR.mapReduceFold
+        (FMR.unpackFilterOnField @DT.CitizenC (== DT.Citizen))
+        (FMR.assignKeysAndData @[GT.StateAbbreviation, GT.TractGeoId] @'[DT.PopCount])
+        (FMR.foldAndAddKey $ FF.foldAllConstrained @Num FL.sum)
+  pure $ FL.fold fld srca
