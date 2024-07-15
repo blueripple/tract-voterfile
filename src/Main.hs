@@ -103,7 +103,9 @@ FS.declareColumn "ADV" '' Double
 FS.declareColumn "RR" '' Double
 FS.declareColumn "MRR" '' Double
 FS.declareColumn "RGap" '' Double
+FS.declareColumn "DRGap" '' Double
 FS.declareColumn "MRGap" '' Double
+FS.declareColumn "DMRGap" '' Double
 
 
 templateVars ∷ Map String String
@@ -159,8 +161,9 @@ main = do
 --    exploreTractVoterfile cmdLine postInfo "PA"
 --    regPAMap_C <- modeledRegistrationForState cmdLine "PA"
 --    K.ignoreCacheTime regPAMap_C >>= putTextLn . show . MC.unPSMap
-    vfAndModeledPA_C <- vfAndModeledByState cmdLine "PA"
-    K.ignoreCacheTime vfAndModeledPA_C >>= writeVFAndModeledToCSV "PA/PA"
+    let modeledState = "GA"
+    vfAndModeledPA_C <- vfAndModeledByState cmdLine modeledState
+    K.ignoreCacheTime vfAndModeledPA_C >>= (writeVFAndModeledToCSV $ modeledState <> "/" <> modeledState)
 --    compareCVAPs cmdLine "GA"
   case resE of
     Right namedDocs →
@@ -170,7 +173,8 @@ main = do
 
 writeVFAndModeledToCSV :: K.KnitEffects r => Text -> F.FrameRec VFAndModeledR -> K.Sem r ()
 writeVFAndModeledToCSV csvName f = do
-  let adv r = realToFrac (r ^. registered - r ^. voted20) * (MT.ciMid (r ^. demIdP) - 0.5)
+  let dEdge r = 2 * (MT.ciMid (r ^. demIdP) - 0.5)
+      adv r = realToFrac (r ^. registered - r ^. voted20) * dEdge r
       rr r = realToFrac (r ^. registered) / realToFrac (r ^. DT.popCount)
       mrr r =  MT.ciMid (r ^. registrationP) --realToFrac (r ^. registered) / realToFrac (r ^. DT.popCount) / MT.ciMid (r ^. registrationP)
       pop = realToFrac . view DT.popCount
@@ -181,9 +185,11 @@ writeVFAndModeledToCSV csvName f = do
       advC = FT.recordSingleton @ADV . adv
       rrC = FT.recordSingleton @RR . rr
       rGapC r = FT.recordSingleton @RGap $ (rr r - avgRR) * pop r
+      drGapC r = FT.recordSingleton @DRGap $ (rr r - avgRR) * pop r * dEdge r
       mrrC r = FT.recordSingleton @MRR $ adj * mrr r
       mrGapC r = FT.recordSingleton @MRGap $ (rr r - adj * mrr r) * pop r
-      addCols r = r  F.<+> rrC r F.<+> rGapC r F.<+> mrrC r F.<+> mrGapC r F.<+> advC r
+      dmrGapC r = FT.recordSingleton @DMRGap $ (rr r - adj * mrr r) * pop r * dEdge r
+      addCols r = r  F.<+> rrC r F.<+> rGapC r F.<+> drGapC r F.<+> mrrC r F.<+> mrGapC r F.<+> dmrGapC r F.<+> advC r
   let wText = FCSV.formatTextAsIs
       printNum n m = PF.printf ("%" <> show n <> "." <> show m <> "g")
       wPrintf :: (V.KnownField t, V.Snd t ~ Double) => Int -> Int -> V.Lift (->) V.ElField (V.Const Text) t
@@ -196,7 +202,9 @@ writeVFAndModeledToCSV csvName f = do
       format = FCSV.formatTextAsIs V.:& FCSV.formatWithShow V.:& FCSV.formatWithShow
                V.:& FCSV.formatWithShow V.:& FCSV.formatWithShow V.:& FCSV.formatWithShow
                V.:& wCI 2 2 V.:& wCI 2 2 V.:& wCI 2 2
-               V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& V.RNil
+               V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& wPrintf 2 2
+               V.:& wPrintf 2 2 V.:& wPrintf 2 2
+               V.:& wPrintf 2 2 V.:& wPrintf 2 2 V.:& V.RNil
       newHeaderMap = M.fromList [("StateAbbreviation", "State")]
 
   K.liftKnit @IO
