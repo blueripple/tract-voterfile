@@ -21,6 +21,7 @@ executable tract-voterfile
   hs-source-dirs: src
   ghc-options: -Wall -O2 -fdicts-strict -fmax-worker-args=16 -fspec-constr-recursive=16 -threaded
   main-is: Main.hs
+  other-modules: RegPost
   build-depends:
      blueripple-post-tools
    , blueripple-small-data-sets
@@ -48,6 +49,7 @@ executable tract-voterfile
    , foldl-statistics >= 0.1.5 && < 0.2
    , ghc-debug-stub >= 0.6.0.0
    , haskell-stan >= 0.1 && < 0.2
+   , here >= 1.2 && < 1.3
    , hs-cmdstan >= 0.1 && < 0.2
    , hmatrix >= 0.20 && < 0.21
    , hmatrix-nlopt >= 0.2 && < 0.3
