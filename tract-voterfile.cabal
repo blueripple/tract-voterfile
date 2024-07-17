@@ -33,6 +33,7 @@ executable tract-voterfile
    , blueripple-data-ACS-Tables
    , blueripple-model-demographic
    , blueripple-model-election2
+   , blaze-html >= 0.9 && < 0.10
    , array >= 0.5 && < 0.6
    , Frames >= 0.7 && < 0.8
    , Frames-utils >= 0.3.1

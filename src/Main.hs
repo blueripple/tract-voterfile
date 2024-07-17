@@ -32,6 +32,7 @@ import qualified BlueRipple.Model.Demographic.TPModel3 as DTM3
 import qualified BlueRipple.Data.Small.Loaders as BRL
 import qualified BlueRipple.Data.Small.DataFrames as BR
 import qualified BlueRipple.Utilities.KnitUtils as BRK
+import qualified BlueRipple.Utilities.TableUtils as BRT
 
 import qualified BlueRipple.Configuration as BR
 import qualified BlueRipple.Data.CachingCore as BRCC
@@ -46,6 +47,10 @@ import qualified BlueRipple.Data.ACS_Tables_Loaders as BRC
 import qualified BlueRipple.Data.ACS_Tables as BRC
 import qualified BlueRipple.Data.RDH_Voterfiles as VF
 import qualified BlueRipple.Utilities.KnitUtils as BR
+
+import qualified Colonnade as C
+import qualified Text.Blaze.Html5              as BH
+import qualified Text.Blaze.Html5.Attributes   as BHA
 
 import qualified Knit.Report as K
 import qualified Knit.Effect.AtomicCache as KC
@@ -217,6 +222,29 @@ regPost cmdLine = do
                  (BR.PubTimes BR.Unpublished Nothing)
   BRK.brNewPost regPostPaths postInfo "RegistrationPost" $ do
     BRK.brAddMarkDown RP.a1
+    BRT.brAddRawHtmlTable (Just "Registration By Age") (BHA.class_ "brTable") (psTableColonnade @'[DT.Age5C] (show . view DT.age5C) mempty) $ fmap F.rcast allByAge
+
+type PSTableR ks = ks V.++ [DT.PopCount, Registered, MR.ModelCI]
+
+alignRightNumStyle :: (PF.PrintfArg a, Num a, Ord a) => Text -> a -> (BH.Html, Text)
+alignRightNumStyle = BRT.numberToStyledHtmlFull False (const BRT.alignRightCell)
+
+psTableColonnade :: forall ks .
+  (ks F.⊆ PSTableR ks
+  , FC.ElemsOf (PSTableR ks) [DT.PopCount, Registered, MR.ModelCI]
+  )
+  => (F.Record ks -> Text) -> BRT.CellStyleF (F.Record (PSTableR ks)) [Char] -> C.Colonnade C.Headed (F.Record (PSTableR ks)) K.Cell
+psTableColonnade catText cas = C.headed "Category" (BRT.toCell cas "Category" "Category" (BRT.textToStyledHtml . catText . F.rcast @ks))
+                               <> C.headed "CVAP" (BRT.toCell cas "CVAP" "CVAP"  (BRT.textToStyledHtml . show . view DT.popCount))
+                               <> C.headed "Registered" (BRT.toCell cas "Reg" "Reg" (alignRightNumStyle "%d" . view registered))
+                               <> C.headed "Modeled" (BRT.toCell cas "Modeled" "Modeled" (alignRightNumStyle "%2.0f" . modeled))
+                               <> C.headed "%Reg" (BRT.toCell cas "%Reg" "%Reg" (alignRightNumStyle @Double "%2.0f" . (100*) . rRate))
+                               <> C.headed "%Model" (BRT.toCell cas "Uncertainty" "Uncertainty" (alignRightNumStyle @Double "%2.0f" . (100*) . modelRate))
+  where
+    modeled r =  realToFrac (r ^. DT.popCount) * MT.ciMid (r ^. MR.modelCI)
+    uncertainty r = realToFrac (r ^. DT.popCount) * (MT.ciUpper (r ^. MR.modelCI) - MT.ciLower (r ^. MR.modelCI))
+    rRate r = realToFrac (r ^. registered) / realToFrac ( r ^. DT.popCount)
+    modelRate r = MT.ciMid (r ^. MR.modelCI)
 
 
 writeVFAndModeledToCSV :: K.KnitEffects r => Text -> F.FrameRec VFAndModeledR -> K.Sem r ()
