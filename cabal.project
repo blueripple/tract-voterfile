@@ -1,21 +1,19 @@
-packages: ./  ../../libs/model-election2 ../../libs/post-tools
+packages: ./
 jobs: 4
 with-compiler: ghc
 profiling: False
 
-allow-newer: polysemy-zoo:ghc-prim, streamly-core
+
+allow-newer: base, ghc-prim, bytestring, time, primitive, containers, constraints
            , freer-simple:template-haskell
+           , polysemy-zoo:text
            , foldl-statistics:hashable, foldl-statistics:profunctors
            , cereal-time:time
-           , heidi:base
-           , generic-trie:base
-           , streamly-bytestring:streamly-core
-           , nonlinear-optimization:primitive, nonlinear-optimization:vector
-           , discrimination:primitive
+           , pipes-text:text, nonlinear-optimization:vector
 
 flags: +streamly9
 
---import: ../../libs/cabal_repo_imports/post-tools.project
+import: ../../libs/cabal_repo_imports/post-tools.project
 import: ../../libs/cabal_repo_imports/small-data-sets.project
 import: ../../libs/cabal_repo_imports/data-types.project
 import: ../../libs/cabal_repo_imports/data-tools.project
@@ -28,7 +26,7 @@ import: ../../libs/cabal_repo_imports/data-CES.project
 import: ../../libs/cabal_repo_imports/data-RDH-voterfiles.project
 import: ../../libs/cabal_repo_imports/model-tools.project
 import: ../../libs/cabal_repo_imports/model-demographic.project
---import: ../../libs/cabal_repo_imports/model-election2.project
+import: ../../libs/cabal_repo_imports/model-election2.project
 import: ../../libs/cabal_repo_imports/haskell-stan.project
 import: ../../libs/cabal_repo_imports/knit-haskell.project
 import: ../../libs/cabal_repo_imports/Frames-streamly.project
@@ -43,3 +41,4 @@ import: ../../libs/cabal_repo_imports/Frames-map-reduce.project
 import: ../../libs/cabal_repo_imports/heidi.project
 import: ../../libs/cabal_repo_imports/polysemy-randomFu.project
 import: ../../libs/cabal_repo_imports/hTensor.project
+import: ../../libs/cabal_repo_imports/dependent-hashmap.project

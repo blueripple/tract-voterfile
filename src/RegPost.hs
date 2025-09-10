@@ -5,8 +5,8 @@ module RegPost where
 
 import Data.String.Here (here)
 
-a1 :: Text
-a1 = [here|
+tMVR1 :: Text
+tMVR1 = [here|
 # Voter Registration in Pennsylvania
 At BlueRipple we have been working to analyze registration, turnout, and voter preference in smaller
 geographies. We've looked at congressional districts each with about 700,000 people,
@@ -51,11 +51,13 @@ See [https://en.wikipedia.org/wiki/Tipping-point_state](https://en.wikipedia.org
 
 
 ### Contents
-1. [Modeling Voter Registration In Census Tracts](#s1)
-2. [PA Registration: Statewide Demographics](#s2)
-3. [PA Registration: Census Tracts](#s3)
+1. [Modeling Voter Registration](#sMVR)
+2. [Registration By Age: National Picture](#sRbAN)
+3. [Registration By Age: PA](#sRbAPA)
+4. [Applying the Model in Census Tracts](#sMCT)
+5. [Registration & Geography in PA](#sRGPA)
 
-### Modeling Voter Registration In Census Tracts {#s1}
+### Modeling Voter Registration {#sMVR}
 
 ## Why Model Voter Registration?
 Since we know the exact number of registered voters from the voter-file data,
@@ -81,14 +83,7 @@ turnout and voter preference, we describe our approach in some detail. The short
 as a source for modeling registration, partisan Id, turnout, and presidential vote. Our model predicts those things as
 a function of age, sex, education, race/ethnicity, state and population density. In order to apply the model to predict something in a specific
 geography, we need to know how many citizens of voting age of each type (e.g., 35-45 year old Asian women with college degrees) live there.
-Our source for this data is the Census Bureau's American Community Survey[^acsIssues].
-
-[^acsIssues]: At the census-tract level, the ACS does not actually give us the breakdown, also known as a "joint distribution",
-we need, which we refer to as CASER (*C*itizenship *A*ge *S*ex *E*ducation *R*ace/Ethnicity)  Instead it provides several smaller joint
-distributions (CSR, ASR and ASE). We have good data for the full CASER table at larger geographies, known as
-Public Use Microdata Areas (or PUMAs). We use a model, informed by the PUMAs, of the relationship of the joint table to the smaller ones
-in order to combine the smaller tables in a way which preserves all the information
-in them while incorporating information from the full tables at larger geographic scales.
+Our source for this data is the Census Bureau's American Community Survey.
 
 In that post we were concerned with modeling voter turnout and presidential vote. In this post we will be focused on voter registration.
 The CES survey also asks questions about voter registration and validates those answers via a voter-file. So the modeling task is
@@ -96,14 +91,22 @@ almost exactly the same as modeling voter turnout. As in our turnout model, give
 demographic category (one of 200 possible combinations of age, sex, education and race/ethnicity), in a state and living
 in a place with a particular population density, we estimate a probability that such a person is registered to vote.
 
-With that model in hand, we construct the joint distribution of people in the census tract, along with the population density.
+With that model in hand, we find the population density and the joint distribution of people in whatever geography is relevant.
 That allows us to estimate the probability that each person is registered to vote.
-We add those probabilities up across all the people and that gives us an estimated number of registered voters of each type in each tract.
+We add those probabilities up across all the people and that gives us an estimated number of registered voters,
+broken down, if useful, into each demographic category.
 
+### Registration By Age: National Picture {#sRbAN}
+Before we dive into the details of PA, let's look at the national picture of voter registration, broken down by age since that's something
+that's also tracked in the voter file. In the table below, we compare the naitonal registration numbers with our model for a few age buckets.
+
+|]
+
+tMVR2 :: Text
+tMVR2 = [here|
 ### PA Registration: Statewide Demographics
-Let's take a quick look at the demographics of voter registration across the state. Since we've mentioned the variations in
-registration rate with age, We'll start there. Age is also a variable which is tracked in the voter-files so we can compare the model
-to the actual numbers. In the table below we see that the model tracks the general trend of increasing rate as age goes up but misses
+Now let's zoom in on PA voter registration across the state.
+In the table below we see that the model tracks the general trend of increasing rate as age goes up but misses
 the truth in PA in various ways. Most noticeable is that the model expects much lower registration in the 25 to 34 than we see in PA and
 much higher registration in the 45 to 64 age group[^diffs].
 
@@ -121,7 +124,17 @@ Suppose we wanted to know more specifically who to target in a registration driv
 since the voter-file doesn't contain any breakdowns with multiple categories. Let's look at the sex, education and race/ethnicity breakdown
 of modeled registration rates in PA.
 
+|]
 
+aMCT :: Text
+aMCT = [here|
+Modeling at the census-tract level involves finding the population density and joint distribution of each census tract.
+This is complicated! At the census-tract level, the ACS does not actually give us the joint distribution
+we need, which we refer to as CASER (*C*itizenship *A*ge *S*ex *E*ducation *R*ace/Ethnicity)  Instead it provides several smaller joint
+distributions (CSR, ASR and ASE). We have good data for the full CASER table at larger geographies, known as
+Public Use Microdata Areas (or PUMAs). We use a model, informed by the PUMAs, of the relationship of the joint table to the smaller ones
+in order to combine the smaller tables in a way which preserves all the information
+in them while incorporating information from the full tables at larger geographic scales.
 
-
+Once that is done, we can apply the model to a specific census-tract as easily as we apply it to larger geographies.
 |]
